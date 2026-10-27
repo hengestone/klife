@@ -78,7 +78,7 @@ defmodule Klife.MixProject do
   defp deps do
     [
       {:klife_protocol,
-       git: "git@github.com:hengestone/klife_protocol.git",
+       git: "https://github.com/hengestone/klife_protocol.git",
        branch: "sasl_auth_support",
        override: "true"},
       {:nimble_options, "~> 1.0"},
