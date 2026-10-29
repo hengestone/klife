@@ -359,7 +359,8 @@ defmodule Klife.Producer.Batcher do
       last_offset_delta: -1,
       base_timestamp: nil,
       max_timestamp: nil,
-      producer_id: p_id,
+      # Kafka expects -1 when the producer is not idempotent.
+      producer_id: p_id || -1,
       producer_epoch: p_epoch,
       base_sequence: base_seq,
       records: [],
