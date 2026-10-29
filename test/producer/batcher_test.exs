@@ -390,4 +390,55 @@ defmodule Klife.Producer.BatcherTest do
              offset_delta: 0
            } = inserted_rec_4
   end
+
+  test "batches from a non idempotent producer have no producer id" do
+    user_state = %Batcher{
+      producer_config: %Producer{
+        acks: :all,
+        batch_size_bytes: 16000,
+        client_id: "my_custom_client_id",
+        client_name: :my_test_client_1,
+        compression_type: :none,
+        delivery_timeout_ms: 60000,
+        enable_idempotence: false,
+        linger_ms: 10_000,
+        max_in_flight_requests: 1,
+        name: :my_non_idempotent_producer,
+        request_timeout_ms: 15000,
+        retry_backoff_ms: 1000
+      },
+      broker_id: 1002,
+      base_sequences: %{},
+      producer_epochs: %{}
+    }
+
+    state =
+      %GenBatcher{
+        user_state: user_state,
+        current_batch: Batcher.init_batch(user_state) |> elem(1),
+        current_batch_size: 0,
+        current_batch_item_count: 0,
+        batch_wait_time_ms: 10_000,
+        in_flight_pool: [nil],
+        next_dispatch_msg_ref: nil,
+        batch_queue: :queue.new(),
+        last_batch_sent_at: System.monotonic_time(:millisecond)
+      }
+
+    rec = %Record{
+      value: "1",
+      key: "key_1",
+      headers: [],
+      topic: "my_topic_1",
+      partition: 0,
+      __estimated_size: 100,
+      __batch_index: 0
+    }
+
+    assert {:reply, {:ok, 60000}, new_state} =
+             Batcher.handle_call({:insert_on_batch, [rec]}, {self(), nil}, state)
+
+    assert %{producer_id: -1, producer_epoch: -1, base_sequence: -1} =
+             new_state.current_batch.data[{"my_topic_1", 0}]
+  end
 end

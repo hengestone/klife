@@ -65,6 +65,10 @@ config :klife, MyClient,
     [
       name: :async_test_producer,
       batch_size_bytes: 5000
+    ],
+    [
+      name: :non_idempotent_producer,
+      enable_idempotence: false
     ]
   ],
   topics: [

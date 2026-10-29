@@ -155,6 +155,21 @@ defmodule Klife.ProducerTest do
     assert length(record_batch) == 1
   end
 
+  test "produce message sync using a non idempotent producer" do
+    record = %Record{
+      value: :rand.bytes(10),
+      key: :rand.bytes(10),
+      headers: [%{key: :rand.bytes(10), value: :rand.bytes(10)}],
+      topic: "test_no_batch_topic",
+      partition: 1
+    }
+
+    assert {:ok, %Record{} = rec} = MyClient.produce(record, producer: :non_idempotent_producer)
+
+    assert_resp_record(record, rec)
+    assert :ok = TestUtils.assert_offset(MyClient, record, rec.offset)
+  end
+
   test "produce with batching" do
     topic = "test_batch_topic"
     parent = self()

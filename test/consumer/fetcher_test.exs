@@ -402,10 +402,21 @@ defmodule Klife.Consumer.FetcherTest do
         %Klife.Record{topic: topic, partition: partition, value: "l"}
       ])
 
-    fetch_resp =
-      Fetcher.fetch([{topic, partition, rec0.offset}], MyClient)
+    # Transaction markers are written asynchronously by the broker, so the
+    # last stable offset may lag behind the last aborted transaction for a
+    # short while. Retry until the record produced after it is visible.
+    all_recs =
+      Enum.reduce_while(1..50, nil, fn _, _ ->
+        fetch_resp = Fetcher.fetch([{topic, partition, rec0.offset}], MyClient)
+        assert {:ok, all_recs} = fetch_resp[{topic, partition, rec0.offset}]
 
-    assert {:ok, all_recs} = fetch_resp[{topic, partition, rec0.offset}]
+        if Enum.any?(all_recs, &(&1.offset == resp_check_rec1.offset)) do
+          {:halt, all_recs}
+        else
+          Process.sleep(100)
+          {:cont, all_recs}
+        end
+      end)
 
     to_check = Enum.find(all_recs, fn r -> r.offset == resp_check_rec0.offset end)
     assert to_check.value == resp_check_rec0.value
