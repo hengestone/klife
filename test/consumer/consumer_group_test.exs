@@ -1007,7 +1007,20 @@ defmodule Klife.Consumer.ConsumerGroupTest do
 
     {:ok, broker_name} = TestUtils.stop_broker(MyClient, cg_state.coordinator_id)
 
-    new_cg_state = :sys.get_state(cg_pid)
+    # A heartbeat in flight to the stopped coordinator blocks the group process
+    # until it times out (rebalance_timeout_ms), so the coordinator change may
+    # take longer than the default :sys.get_state/1 timeout to be observed.
+    new_cg_state =
+      Enum.reduce_while(1..60, nil, fn _, _ ->
+        new_cg_state = :sys.get_state(cg_pid, 60_000)
+
+        if new_cg_state.coordinator_id != cg_state.coordinator_id do
+          {:halt, new_cg_state}
+        else
+          Process.sleep(500)
+          {:cont, new_cg_state}
+        end
+      end)
 
     assert new_cg_state.coordinator_id != cg_state.coordinator_id
 

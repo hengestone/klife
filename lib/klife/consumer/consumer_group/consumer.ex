@@ -611,6 +611,14 @@ defmodule Klife.Consumer.ConsumerGroup.Consumer do
     :batcher_down,
     :broker_removed,
     :unexpected_resp,
+    # Socket errors from writing the fetch request, e.g. while the broker
+    # connection is being re-established
+    :closed,
+    :enotconn,
+    :econnreset,
+    :econnrefused,
+    :epipe,
+    :etimedout,
     -1,
     3,
     5,
