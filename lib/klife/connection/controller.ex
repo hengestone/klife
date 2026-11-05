@@ -354,8 +354,8 @@ defmodule Klife.Connection.Controller do
   end
 
   def get_random_broker_id(client_name) do
-    {:known_brokers_ids, client_name}
-    |> :persistent_term.get()
+    client_name
+    |> get_known_brokers()
     |> Enum.random()
   end
 
@@ -372,10 +372,24 @@ defmodule Klife.Connection.Controller do
   end
 
   def get_cluster_controller(client_name),
-    do: :persistent_term.get({:cluster_controller, client_name})
+    do: await_cluster_info({:cluster_controller, client_name})
 
   def get_known_brokers(client_name),
-    do: :persistent_term.get({:known_brokers_ids, client_name})
+    do: await_cluster_info({:known_brokers_ids, client_name})
+
+  # Cluster info is only stored after the first successful metadata request. If it
+  # failed while the controller was starting, wait for the next successful check
+  # instead of crashing callers that start right after the client
+  defp await_cluster_info({_key, client_name} = term_key) do
+    case :persistent_term.get(term_key, :not_found) do
+      :not_found ->
+        :ok = trigger_brokers_verification(client_name)
+        :persistent_term.get(term_key)
+
+      value ->
+        value
+    end
+  end
 
   def get_cluster_info(%Connection{} = conn) do
     req = %{

@@ -2,7 +2,7 @@ defmodule Klife.Utils do
   @moduledoc false
   # TODO: Everything that is in here must be moved to a proper place
 
-  def get_brokers(client), do: :persistent_term.get({:known_brokers_ids, client})
+  def get_brokers(client), do: Klife.Connection.Controller.get_known_brokers(client)
 
   # TODO: Refactor and think about topic auto creation feature
   # right now there is a bug when the Connection system intialize before
