@@ -77,10 +77,13 @@ defmodule Klife.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:klife_protocol, "~> 2.1"},
+      {:klife_protocol,
+       git: "https://github.com/hengestone/klife_protocol.git",
+       branch: "nullable_record_fix",
+       override: true},
       {:nimble_options, "~> 1.0"},
       {:nimble_pool, "~> 1.1"},
-      {:uuid, "~> 1.1"},
+      {:elixir_uuid, "~> 1.2"},
       # docs
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       # Benchmarks and tests
