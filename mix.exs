@@ -79,7 +79,7 @@ defmodule Klife.MixProject do
     [
       {:klife_protocol,
        git: "https://github.com/hengestone/klife_protocol.git",
-       branch: "nullable_record_fix",
+       branch: "master",
        override: true},
       {:nimble_options, "~> 1.0"},
       {:nimble_pool, "~> 1.1"},

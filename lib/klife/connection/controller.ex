@@ -23,6 +23,8 @@ defmodule Klife.Connection.Controller do
 
   @check_cluster_delay Application.compile_env(:klife, :metadata_check_interval_ms, 10_000)
 
+  @bootstrap_retry_delays_seconds [1, 1, 1, 1, 5, 5, 10]
+
   @connection_opts [
     bootstrap_servers: [
       type: {:list, :string},
@@ -81,6 +83,7 @@ defmodule Klife.Connection.Controller do
     :known_brokers,
     :connect_opts,
     :bootstrap_conn,
+    :bootstrap_attempts,
     :check_cluster_timer_ref,
     :check_cluster_waiting_pids,
     :ssl,
@@ -148,6 +151,7 @@ defmodule Klife.Connection.Controller do
       ssl: ssl,
       known_brokers: [],
       bootstrap_conn: nil,
+      bootstrap_attempts: 0,
       check_cluster_timer_ref: nil,
       check_cluster_waiting_pids: [],
       sasl_opts: sasl_opts,
@@ -173,30 +177,43 @@ defmodule Klife.Connection.Controller do
   @impl true
 
   def handle_info(:init_bootstrap_conn, %__MODULE__{} = state) do
-    conn =
-      connect_bootstrap_server(
-        state.bootstrap_servers,
-        state.ssl,
-        state.connect_opts,
-        state.socket_opts,
-        # For the first connection we do not have the API versions yet so we can not pass sasl_opts
-        []
-      )
+    case {open_bootstrap_conn(state), state.bootstrap_conn} do
+      {{:ok, conn, new_sasl_opts}, old_conn} ->
+        :ok = schedule_bootstrap_reauth(conn, state.client_name)
 
-    negotiate_api_versions(conn, state.client_name)
-    new_sasl_opts = Connection.build_sasl_opts(state.sasl_opts, state.client_name)
-    conn = Connection.authenticate_sasl(conn, new_sasl_opts)
-    :ok = schedule_bootstrap_reauth(conn, state.client_name)
+        # Initialized again after a failed cluster check: the old one is of no use
+        if old_conn, do: Connection.close(old_conn)
 
-    new_state = %__MODULE__{
-      state
-      | bootstrap_conn: conn,
-        sasl_opts: new_sasl_opts
-    }
+        new_state = %__MODULE__{
+          state
+          | bootstrap_conn: conn,
+            bootstrap_attempts: 0,
+            sasl_opts: new_sasl_opts
+        }
 
-    {_, new_state} = handle_info(:check_cluster, new_state)
+        {_, new_state} = handle_info(:check_cluster, new_state)
 
-    {:noreply, new_state}
+        {:noreply, new_state}
+
+      # While the client starts, fail fast: e.g. wrong credentials or servers
+      {{:error, errors}, nil} ->
+        raise """
+        Could not connect with any boostrap server provided on configuration.
+        Errors: #{inspect(errors)}
+        """
+
+      # Once started, retry instead of crashing: every restart would authenticate again,
+      # e.g. with the same refused token, and may exhaust the supervisor's restarts
+      {{:error, errors}, _old_conn} ->
+        Logger.error(
+          "Could not initialize the bootstrap connection again, will retry: #{inspect(errors)} (client=#{inspect(state.client_name)})",
+          client: state.client_name,
+          reason: inspect(errors)
+        )
+
+        Process.send_after(self(), :init_bootstrap_conn, bootstrap_retry_delay(state))
+        {:noreply, %__MODULE__{state | bootstrap_attempts: state.bootstrap_attempts + 1}}
+    end
   end
 
   # The session is about to end. Requests on the bootstrap connection are sent and read
@@ -206,19 +223,30 @@ defmodule Klife.Connection.Controller do
         {:reauth_bootstrap_conn, socket},
         %__MODULE__{bootstrap_conn: %Connection{socket: socket} = old} = state
       ) do
-    conn =
-      connect_bootstrap_server(
-        state.bootstrap_servers,
-        state.ssl,
-        state.connect_opts,
-        state.socket_opts,
-        state.sasl_opts
-      )
+    case connect_bootstrap_server(state) do
+      {:ok, conn} ->
+        :ok = schedule_bootstrap_reauth(conn, state.client_name)
+        Connection.close(old)
 
-    :ok = schedule_bootstrap_reauth(conn, state.client_name)
-    Connection.close(old)
+        {:noreply, %__MODULE__{state | bootstrap_conn: conn, bootstrap_attempts: 0}}
 
-    {:noreply, %__MODULE__{state | bootstrap_conn: conn}}
+      # The old session lasts at least a drain longer, keep using it meanwhile. If it
+      # ends first, the cluster check fails and initializes the connection again
+      {:error, errors} ->
+        Logger.error(
+          "Could not replace the bootstrap connection before its session ends, will retry: #{inspect(errors)} (client=#{inspect(state.client_name)})",
+          client: state.client_name,
+          reason: inspect(errors)
+        )
+
+        Process.send_after(
+          self(),
+          {:reauth_bootstrap_conn, socket},
+          bootstrap_retry_delay(state)
+        )
+
+        {:noreply, %__MODULE__{state | bootstrap_attempts: state.bootstrap_attempts + 1}}
+    end
   end
 
   # Set for a bootstrap connection that was initialized again meanwhile
@@ -546,31 +574,55 @@ defmodule Klife.Connection.Controller do
   defp get_in_flight_messages_table_name(client_name),
     do: :persistent_term.get({__MODULE__, client_name, :in_flight_table})
 
-  defp connect_bootstrap_server(servers, ssl, connect_opts, socket_opts, sasl_opts) do
-    conn =
-      Enum.reduce_while(servers, [], fn url, acc ->
-        case Connection.new(
-               url,
-               ssl,
-               Keyword.merge(connect_opts, active: false),
-               socket_opts,
-               sasl_opts
-             ) do
-          {:ok, conn} ->
-            {:halt, conn}
+  # The first bootstrap server that connects and authenticates. Refused credentials
+  # move on to the next one too: e.g. a token refused by one broker is dropped from
+  # the cache by `on_rejected_mfa`, and the next server gets a new one
+  defp connect_bootstrap_server(%__MODULE__{} = state) do
+    first_bootstrap_server(state, fn url ->
+      Connection.new(
+        url,
+        state.ssl,
+        Keyword.merge(state.connect_opts, active: false),
+        state.socket_opts,
+        state.sasl_opts
+      )
+    end)
+  end
 
-          {:error, reason} ->
-            {:cont, [{url, reason} | acc]}
-        end
-      end)
+  # Like connect_bootstrap_server/1, but the API versions are negotiated before
+  # authenticating: the SASL messages versions are not known before that
+  defp open_bootstrap_conn(%__MODULE__{} = state) do
+    first_bootstrap_server(state, fn url ->
+      connect_opts = Keyword.merge(state.connect_opts, active: false)
 
-    if match?(%Connection{}, conn),
-      do: conn,
-      else:
-        raise("""
-        Could not connect with any boostrap server provided on configuration.
-        Errors: #{inspect(conn)}
-        """)
+      with {:ok, conn} <- Connection.new(url, state.ssl, connect_opts, state.socket_opts, []) do
+        negotiate_api_versions(conn, state.client_name)
+        sasl_opts = Connection.build_sasl_opts(state.sasl_opts, state.client_name)
+
+        with {:ok, conn} <- Connection.authenticate(conn, sasl_opts),
+             do: {:ok, conn, sasl_opts}
+      end
+    end)
+  end
+
+  defp first_bootstrap_server(%__MODULE__{} = state, connect_fun) do
+    state.bootstrap_servers
+    |> Enum.reduce_while([], fn url, errors ->
+      case connect_fun.(url) do
+        {:error, reason} -> {:cont, [{url, reason} | errors]}
+        ok -> {:halt, ok}
+      end
+    end)
+    |> case do
+      errors when is_list(errors) -> {:error, Enum.reverse(errors)}
+      ok -> ok
+    end
+  end
+
+  defp bootstrap_retry_delay(%__MODULE__{bootstrap_attempts: attempts}) do
+    max_idx = length(@bootstrap_retry_delays_seconds) - 1
+    base_delay_seconds = Enum.at(@bootstrap_retry_delays_seconds, min(attempts, max_idx))
+    round(base_delay_seconds * 1000 * (Enum.random(50..150) / 100))
   end
 
   # Raises on sessions shorter than the drain, the same rule broker connections follow

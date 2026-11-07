@@ -3,6 +3,7 @@ defmodule Klife.Connection do
   alias KlifeProtocol.Socket
   alias Klife.Connection.MessageVersions, as: MV
   alias KlifeProtocol.Messages, as: M
+  alias KlifeProtocol.SASL.AuthenticationError
 
   alias Klife.Connection.Controller
 
@@ -24,19 +25,34 @@ defmodule Klife.Connection do
             # TODO: Should we expose this?
             read_timeout: :timer.seconds(60)
           }
-          |> authenticate_sasl(sasl_opts)
 
-        :ok = socket_opts(conn, socket_opts)
-
-        {:ok, conn}
+        with {:ok, conn} <- authenticate(conn, sasl_opts) do
+          :ok = socket_opts(conn, socket_opts)
+          {:ok, conn}
+        end
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  # Raises if the broker refuses the credentials. `session_lifetime_ms` is how long
-  # the broker keeps the session, 0 when it never ends (also without SASL)
+  # Like authenticate_sasl/2, but refused credentials are an error to retry, not a
+  # crash. The socket is closed on any failure, so failed attempts don't leak it
+  def authenticate(%__MODULE__{} = conn, sasl_opts) do
+    {:ok, authenticate_sasl(conn, sasl_opts)}
+  rescue
+    error in AuthenticationError ->
+      close(conn)
+      {:error, {:sasl_authentication_failed, error}}
+
+    error ->
+      close(conn)
+      reraise error, __STACKTRACE__
+  end
+
+  # Raises `KlifeProtocol.SASL.AuthenticationError` if the broker refuses the
+  # credentials. `session_lifetime_ms` is how long the broker keeps the session, 0 when
+  # it never ends (also without SASL)
   def authenticate_sasl(%__MODULE__{socket: socket} = conn, sasl_opts) do
     {:ok, %{session_lifetime_ms: lifetime}} =
       Socket.authenticate(socket, get_socket_backend(conn.ssl), sasl_opts)
