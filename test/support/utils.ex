@@ -183,12 +183,14 @@ defmodule Klife.TestUtils do
     partition_resp.records
   end
 
-  def get_latest_offset(client, topic, partition, base_ts) do
+  # With isolation_level 1 (read committed) and base_ts -1 this is the last stable
+  # offset, with 0 (read uncommitted) the high watermark
+  def get_latest_offset(client, topic, partition, base_ts, isolation_level \\ 1) do
     broker = Klife.MetadataCache.get_metadata_attribute(client, topic, partition, :leader_id)
 
     content = %{
       replica_id: -1,
-      isolation_level: 1,
+      isolation_level: isolation_level,
       topics: [
         %{
           name: topic,
@@ -219,6 +221,22 @@ defmodule Klife.TestUtils do
   def wait_for_stable_offset(client, topic, partition, offset, timeout \\ 10_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait_for_stable_offset(client, topic, partition, offset, deadline)
+  end
+
+  # Transaction markers are written by the broker after the transaction ends, so a read
+  # committed fetch may miss records produced right after another test's transaction.
+  # Waits until no partition of `topics` has records beyond its last stable offset
+  def wait_for_stable_topics(client, topics, timeout \\ 10_000) do
+    for %{topic_name: topic, partition_idx: partition} <-
+          Klife.MetadataCache.get_all_metadata(client),
+        topic in topics do
+      high_watermark = get_latest_offset(client, topic, partition, -1, 0)
+
+      if high_watermark > 0,
+        do: wait_for_stable_offset(client, topic, partition, high_watermark - 1, timeout)
+    end
+
+    :ok
   end
 
   defp do_wait_for_stable_offset(client, topic, partition, offset, deadline) do

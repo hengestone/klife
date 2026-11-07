@@ -63,7 +63,7 @@ When `sasl_opts` is set, every broker connection authenticates with the given `m
     ]
 ```
 
-`OAUTHBEARER` takes a `token_mfa`, applied on every authentication to get the token (a binary), and optional `extensions` (a map):
+`OAUTHBEARER` takes a `token_mfa`, applied on every authentication to get the token (a binary), an optional `on_rejected_mfa`, applied when the broker refuses a token, and optional `extensions` (a map):
 
 ```elixir
   config :my_app, MyApp.Client,
@@ -73,13 +73,22 @@ When `sasl_opts` is set, every broker connection authenticates with the given `m
       sasl_opts: [
         mechanism: "OAUTHBEARER",
         mechanism_opts: [
-          token_mfa: {MyApp.TokenCache, :get_token, []}
+          token_mfa: {MyApp.TokenCache, :get_token, []},
+          on_rejected_mfa: {MyApp.TokenCache, :drop_token, []}
         ]
       ]
     ]
 ```
 
 Fetching, caching and refreshing the token is up to you. Since every connection authenticates on its own, `token_mfa` should return a cached token, and refresh it before 80% of its lifetime: a session never outlives its token.
+
+A cached token the broker refuses, for instance because it was revoked, would be refused again on every connection until it expires. `on_rejected_mfa` is applied with the refused token and the broker's error appended to its args (`MyApp.TokenCache.drop_token(token, error)` above), so the cache can drop it and the next authentication fetches a new one. Many connections may be refused at once with the same token, so drop it only if the cache still holds that token, and fetch a new one once for all of them.
+
+> #### Refused credentials {: .info}
+>
+> When the client starts, refused credentials (any mechanism) make it fail to start. Once started,
+> a connection whose credentials are refused is retried with backoff instead of crashing, and a
+> connection being replaced before its session ends is kept until the replacement authenticates.
 
 > #### Session expiration {: .info}
 >

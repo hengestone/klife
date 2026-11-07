@@ -119,11 +119,31 @@ defmodule Klife.Connection.Broker do
     # so the previous draining connection is closed by now
     %__MODULE__{draining_conn: nil} = state
 
-    {:ok, conn} = open_conn(state)
+    case open_conn(state) do
+      {:ok, conn} ->
+        Process.send_after(
+          self(),
+          {:close_draining, socket},
+          Connection.drain_ms(state.client_name)
+        )
 
-    Process.send_after(self(), {:close_draining, socket}, Connection.drain_ms(state.client_name))
+        new_state = %__MODULE__{state | draining_conn: old, reconnect_attempts: 0}
+        {:noreply, activate_conn(new_state, conn)}
 
-    {:noreply, activate_conn(%__MODULE__{state | draining_conn: old}, conn)}
+      # Callers keep using the current connection, its session lasts at least a drain
+      # longer. If it ends first, the broker closes it and the reconnection takes over
+      {:error, reason} ->
+        Logger.error(
+          "Error re-authenticating with broker #{state.broker_id} on host #{state.url}, will retry: #{inspect(reason)} (client=#{inspect(state.client_name)})",
+          client: state.client_name,
+          broker_id: state.broker_id,
+          host: state.url,
+          reason: inspect(reason)
+        )
+
+        Process.send_after(self(), {:reauth, socket}, get_reconnect_delay(state))
+        {:noreply, %__MODULE__{state | reconnect_attempts: state.reconnect_attempts + 1}}
+    end
   end
 
   # Set for a connection that was replaced by a reconnection meanwhile
